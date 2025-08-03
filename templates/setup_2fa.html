@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-center align-items-center">
+    <div class="card shadow-sm p-4 w-100" style="max-width: 500px; border-radius: 12px;">
+        <h3 class="text-center mb-3">🔒 إعداد المصادقة الثنائية</h3>
+
+        <p class="text-center text-muted">امسح رمز الـ QR باستخدام تطبيق Google Authenticator أو أي تطبيق آخر.</p>
+
+        <div class="text-center mb-4">
+            <img src="data:image/png;base64,{{ qr_code }}" alt="QR Code" class="img-fluid" style="max-width: 200px;">
+        </div>
+
+        <hr>
+
+        <p class="text-center text-muted">بعد المسح، أدخل الرمز المكون من 6 أرقام:</p>
+
+        <form method="POST" action="">
+            {{ form.hidden_tag() }}
+
+            <div class="mb-3">
+                {{ form.otp.label(class="form-label") }}
+                {% if form.otp.errors %}
+                    {{ form.otp(class="form-control is-invalid", autocomplete="off") }}
+                    <div class="invalid-feedback">
+                        {% for error in form.otp.errors %}
+                            <span>{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    {{ form.otp(class="form-control", autocomplete="off") }}
+                {% endif %}
+            </div>
+
+            <div class="d-grid mt-4">
+                {{ form.submit(class="btn btn-success btn-lg") }}
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock content %}

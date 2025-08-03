@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-center align-items-center" style="min-height: 70vh;">
+    <div class="card shadow-sm p-4 w-100" style="max-width: 450px; border-radius: 12px;">
+        <h3 class="text-center mb-4">🔐 تسجيل الدخول</h3>
+        <form method="POST" action="">
+            {{ form.hidden_tag() }}
+
+            <!-- البريد الإلكتروني -->
+            <div class="mb-3">
+                {{ form.email.label(class="form-label") }}
+                {% if form.email.errors %}
+                    {{ form.email(class="form-control is-invalid", autocomplete="email") }} {# <-- تمت إضافة autocomplete #}
+                    <div class="invalid-feedback">
+                        {% for error in form.email.errors %}
+                            <span>{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    {{ form.email(class="form-control", autocomplete="email") }} {# <-- تمت إضافة autocomplete #}
+                {% endif %}
+            </div>
+
+            <!-- كلمة المرور -->
+            <div class="mb-3">
+                {{ form.password.label(class="form-label") }}
+                {% if form.password.errors %}
+                    {{ form.password(class="form-control is-invalid", autocomplete="current-password") }} {# <-- تمت إضافة autocomplete #}
+                    <div class="invalid-feedback">
+                        {% for error in form.password.errors %}
+                            <span>{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    {{ form.password(class="form-control", autocomplete="current-password") }} {# <-- تمت إضافة autocomplete #}
+                {% endif %}
+            </div>
+
+            <!-- زر الدخول -->
+            <div class="d-grid mt-4">
+                {{ form.submit(class="btn btn-primary btn-lg") }}
+            </div>
+        </form>
+
+        <!-- رابط التسجيل -->
+        <div class="text-center mt-3 border-top pt-3">
+            <small class="text-muted">
+                ليس لديك حساب؟ <a href="{{ url_for('register_route') }}" class="text-decoration-none">أنشئ حسابًا الآن</a>
+            </small>
+        </div>
+    </div>
+</div>
+{% endblock content %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %} <!-- افترض أن لديك قالب أساسي -->
+{% block content %}
+<div class="content-section">
+    <h2 class="mb-4">إدارة حسابي</h2>
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title">المصادقة الثنائية (2FA)</h5>
+            <p class="card-text">
+                حالة المصادقة الثنائية:
+                {% if current_user.is_2fa_enabled %}
+                    <span class="badge bg-success">مفعلة</span>
+                {% else %}
+                    <span class="badge bg-danger">غير مفعلة</span>
+                {% endif %}
+            </p>
+
+            {% if current_user.is_2fa_enabled %}
+                <p>يمكنك تعطيل المصادقة الثنائية إذا كنت ترغب في ذلك (غير موصى به).</p>
+                <form action="{{ url_for('disable_2fa_route') }}" method="POST">
+                    <button type="submit" class="btn btn-danger">تعطيل المصادقة الثنائية</button>
+                </form>
+            {% else %}
+                <p>قم بتأمين حسابك باستخدام المصادقة الثنائية عبر تطبيق مثل Google Authenticator.</p>
+                <a href="{{ url_for('setup_2fa_route') }}" class="btn btn-primary">إعداد المصادقة الثنائية الآن</a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock content %}

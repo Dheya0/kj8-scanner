@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Security Report - تقرير أمني</title>
+    <!-- Google Fonts: Inter, Tajawal, JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=Tajawal:wght@400;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js for visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
+
+    <style>
+        :root {
+            --font-ar: 'Tajawal', sans-serif;
+            --font-en: 'Inter', sans-serif;
+            --font-code: 'JetBrains Mono', monospace;
+            --color-primary: #0A2E5C;
+            --color-secondary: #00A3A1;
+            --color-text: #2c3e50;
+            --color-border: #dee2e6;
+            --sev-critical: #D92D20;
+            --sev-high: #F79009;
+            --sev-medium: #FDB022;
+            --sev-low: #0086D1;
+            --sev-info: #6c757d;
+            --page-bg: #ffffff;
+            --card-bg: #f8f9fa;
+        }
+        body { color: var(--color-text); font-size: 11pt; line-height: 1.6; background-color: var(--page-bg); }
+        body.ar { font-family: var(--font-ar); }
+        body.en { font-family: var(--font-en); }
+        @page { size: A4; margin: 1.5cm; }
+        .container { max-width: 960px; margin: 2rem auto; }
+        h1, h2, h3, h4, h5 { font-weight: 700; color: var(--color-primary); }
+        code { font-family: var(--font-code); background: #e9ecef; padding: 2px 5px; border-radius: 4px; border: 1px solid #ced4da; font-size: 9pt; color: #d63384; }
+        .page-break { page-break-after: always; }
+        .top-controls { position: fixed; top: 1rem; right: 1rem; z-index: 1000; display: flex; gap: 0.5rem; }
+        .top-controls .btn { background: var(--color-primary); color: white; border: none; }
+        .report-header { text-align: center; border-bottom: 2px solid var(--color-border); padding-bottom: 1rem; margin-bottom: 2rem; }
+        .section-title { font-size: 22pt; color: var(--color-secondary); border-bottom: 2px solid var(--color-border); padding-bottom: 8px; margin-top: 2.5rem; margin-bottom: 1.5rem; }
+        .summary-metric { border: 1px solid var(--color-border); border-radius: 8px; padding: 15px; text-align: center; background: var(--card-bg); }
+        .summary-metric .label { font-size: 9pt; text-transform: uppercase; color: #555; }
+        .summary-metric .value { font-size: 20pt; font-weight: 700; }
+        .executive-text h4 { font-size: 14pt; margin-top: 1.5rem; color: var(--color-secondary); }
+        .executive-text p { text-align: justify; }
+        .vuln-card { page-break-inside: avoid; border: 1px solid var(--color-border); border-radius: 8px; margin-bottom: 1.5rem; overflow: hidden; background: white; }
+        .vuln-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; border-bottom: 1px solid var(--color-border); font-size: 14pt; font-weight: 700; background: var(--card-bg); }
+        body.ar .vuln-header { border-right: 8px solid; }
+        body.en .vuln-header { border-left: 8px solid; }
+        .severity-badge { color: white; padding: 4px 12px; border-radius: 50px; font-size: 10pt; }
+        .vuln-body { padding: 15px; }
+        .vuln-body h5 { font-size: 12pt; font-weight: 700; color: #333; margin: 15px 0 5px 0; }
+        .evidence-block { background: #e9ecef; border: 1px solid #ced4da; border-radius: 6px; padding: 10px; margin-top: 5px; direction: ltr; text-align: left; }
+        .evidence-row { display: grid; grid-template-columns: 140px 1fr; border-bottom: 1px solid #d8dde3; padding: 5px 0; font-size: 10pt; }
+        .evidence-row:last-child { border-bottom: none; }
+        .evidence-key { font-weight: 700; }
+        .vuln-references { font-size: 9pt; margin-top: 15px; padding-top: 10px; border-top: 1px dashed var(--color-border); }
+        .vuln-references a { text-decoration: none; color: var(--color-primary); font-weight: bold; }
+        .vuln-header.critical { border-color: var(--sev-critical); } .badge-critical { background-color: var(--sev-critical); }
+        .vuln-header.high { border-color: var(--sev-high); } .badge-high { background-color: var(--sev-high); }
+        .vuln-header.medium { border-color: var(--sev-medium); } .badge-medium { background-color: var(--sev-medium); color: #212529 !important; }
+        .vuln-header.low { border-color: var(--sev-low); } .badge-low { background-color: var(--sev-low); }
+        .vuln-header.info { border-color: var(--sev-info); } .badge-info { background-color: var(--sev-info); }
+    </style>
+</head>
+<body {% if lang == 'ar' %}class="ar" dir="rtl"{% else %}class="en" dir="ltr"{% endif %}>
+
+    <div class="top-controls">
+        <!-- زر تنزيل التقرير -->
+        <a href="{{ url_for('download_report_route', scan_id=results.scan_id, lang=lang) }}" class="btn" title="Download Report as PDF">
+            <i class="fas fa-file-pdf"></i>
+        </a>
+        <!-- زر تبديل اللغة -->
+        {% if lang == 'ar' %}
+            <a href="{{ url_for('results_route', scan_id=results.scan_id, lang='en') }}" class="btn" title="Switch to English">
+                <i class="fas fa-language"></i>
+            </a>
+        {% else %}
+            <a href="{{ url_for('results_route', scan_id=results.scan_id, lang='ar') }}" class="btn" title="التحويل إلى العربية">
+                <i class="fas fa-language"></i>
+            </a>
+        {% endif %}
+    </div>
+
+    <div class="container">
+        <!-- =============== HEADER =============== -->
+        <div class="report-header">
+            <h1 style="font-size: 28pt;">{{ tr.security_assessment_report }}</h1>
+            <p style="font-size: 14pt; color: #555; direction: ltr;"><code>{{ results.target }}</code></p>
+            <p class="text-muted">
+                {% if lang == 'ar' %}
+                    <b>تاريخ الإصدار:</b> {{ results.scan_time|jinja2_filter_datetime('%Y-%m-%d') }} | <b>معرّف الفحص:</b> <code style="direction: ltr; display: inline-block;">{{ results.scan_id }}</code>
+                {% else %}
+                    <b>Date Issued:</b> {{ results.scan_time|jinja2_filter_datetime('%Y-%m-%d') }} | <b>Scan ID:</b> <code>{{ results.scan_id }}</code>
+                {% endif %}
+            </p>
+        </div>
+
+        <!-- =============== EXECUTIVE SUMMARY =============== -->
+        <div class="section-title">
+            <h2>{{ tr.executive_summary }}</h2>
+        </div>
+        <div class="row">
+            <div class="col-md-7">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap:15px; margin-bottom:20px;">
+                    <div class="summary-metric"><div class="label">{{ tr.overall_risk_level }}</div><div class="value" style="color:{{ risk_level.color }};">{% if lang == 'ar' %}{{ risk_level.text_ar }}{% else %}{{ risk_level.text_en }}{% endif %}</div></div>
+                    <div class="summary-metric"><div class="label">{{ tr.total_vulnerabilities }}</div><div class="value">{{ results.vulnerabilities|length }}</div></div>
+                    <div class="summary-metric"><div class="label">{{ tr.critical_findings }}</div><div class="value" style="color:var(--sev-critical);">{{ chart_data.critical }}</div></div>
+                    <div class="summary-metric"><div class="label">{{ tr.high_findings }}</div><div class="value" style="color:var(--sev-high);">{{ chart_data.high }}</div></div>
+                </div>
+            </div>
+            <div class="col-md-5">
+                <div style="position: relative; height: 180px; margin: auto;"><canvas id="severityChart"></canvas></div>
+            </div>
+        </div>
+        <div class="executive-text">
+            <h4>{{ tr.key_observations }}</h4>
+            {% if lang == 'ar' %}
+                <p>كشف تقييم <strong>{{ results.target }}</strong> عن <strong>{{ results.vulnerabilities|length }}</strong> ثغرة، مما يشير إلى وضع مخاطرة بمستوى <strong>{{ risk_level.text_ar }}</strong>. قد تعرض هذه النقاط التطبيق لهجمات تؤدي إلى تسريب بيانات أو تعطيل الخدمة.</p>
+            {% else %}
+                <p>The assessment of <strong>{{ results.target }}</strong> identified <strong>{{ results.vulnerabilities|length }}</strong> vulnerabilities, indicating a <strong>{{ risk_level.text_en }}</strong> risk posture. These weaknesses could expose the application to attacks, leading to data breaches or service disruption.</p>
+            {% endif %}
+
+            <h4>{{ tr.strategic_recommendation }}</h4>
+             {% if lang == 'ar' %}
+                <p>يجب إعطاء أولوية قصوى لمعالجة كافة الثغرات ذات الخطورة <strong>الحرجة</strong> و<strong>العالية</strong>. نوصي بتخصيص الموارد التقنية فورًا لمواجهة هذه النتائج والحد من المخاطر الجوهرية على الأعمال.</p>
+            {% else %}
+                <p>Prioritize remediation of all <strong>Critical</strong> and <strong>High</strong> severity vulnerabilities. Allocate immediate technical resources to address these findings and mitigate significant business risks.</p>
+            {% endif %}
+        </div>
+
+        <!-- =============== TECHNICAL FINDINGS =============== -->
+        <div class="section-title">
+            <h2>{{ tr.technical_findings }}</h2>
+        </div>
+
+        {% for vuln in results.vulnerabilities %}
+        <div class="vuln-card">
+            <div class="vuln-header {{ vuln.severity|lower }}">
+                <span style="font-family: var(--font-en);">{{ vuln.name }}</span>
+                <span class="severity-badge badge-{{ vuln.severity|lower }}">{{ vuln.severity }}</span>
+            </div>
+            <div class="vuln-body">
+                <!-- Description -->
+                <h5><i class="fas fa-file-alt fa-fw"></i> {{ tr.description_impact }}</h5>
+                <p>{% if lang == 'ar' and vuln.description_translated %}{{ vuln.description_translated }}{% else %}{{ vuln.description }}{% endif %}</p>
+
+                <!-- Remediation -->
+                <h5 style="margin-top:15px;"><i class="fas fa-shield-alt fa-fw"></i> {{ tr.remediation_steps }}</h5>
+                <p>{% if lang == 'ar' and vuln.remediation_translated %}{{ vuln.remediation_translated }}{% else %}{{ vuln.remediation }}{% endif %}</p>
+
+                <!-- Technical Evidence -->
+                <h5 style="margin-top:15px;"><i class="fas fa-microscope fa-fw"></i> {{ tr.technical_evidence }}</h5>
+                <div class="evidence-block">
+                {% for key, value in vuln.evidence.items() %}
+                    <div class="evidence-row">
+                        <div class="evidence-key"><code>{{ key }}</code></div>
+                        <div class="evidence-value"><code>{{ value }}</code></div>
+                    </div>
+                {% endfor %}
+                </div>
+
+                <!-- References -->
+                <div class="vuln-references">
+                    {% if vuln.cwe %}
+                        <a href="https://cwe.mitre.org/data/definitions/{{ vuln.cwe.split('-')[1] }}.html" target="_blank" rel="noopener noreferrer">
+                            <i class="fas fa-link"></i> {{ tr.reference }}: {{ vuln.cwe }}
+                        </a>
+                    {% endif %}
+                    {% if vuln.cve %}
+                        <span class="mx-2">|</span>
+                        <a href="https://nvd.nist.gov/vuln/detail/{{ vuln.cve }}" target="_blank" rel="noopener noreferrer">
+                            <i class="fas fa-book"></i> {{ tr.example_cve }}: {{ vuln.cve }}
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <script>
+        const ctx = document.getElementById('severityChart');
+        if (ctx) {
+            Chart.register(ChartDataLabels);
+            new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Critical', 'High', 'Medium', 'Low', 'Info'],
+                    datasets: [{
+                        data: [{{ chart_data.critical }}, {{ chart_data.high }}, {{ chart_data.medium }}, {{ chart_data.low }}, {{ chart_data.info }}],
+                        backgroundColor: ['#D92D20', '#F79009', '#FDB022', '#0086D1', '#6c757d'],
+                        borderColor: '#ffffff', borderWidth: 3
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'right', labels: { font: { family: 'Inter' } } },
+                        datalabels: {
+                            formatter: (value) => { return value > 0 ? value : ''; },
+                            color: '#fff', font: { weight: 'bold', family: 'Inter', size: 12 }
+                        }
+                    },
+                    cutout: '60%'
+                }
+            });
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Security Report - تقرير أمني</title>
+    <!-- Google Fonts: Inter for English, Tajawal for Arabic, JetBrains Mono for Code -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=Tajawal:wght@400;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js for visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
+
+    <style>
+        :root {
+            --font-ar: 'Tajawal', sans-serif;
+            --font-en: 'Inter', sans-serif;
+            --font-code: 'JetBrains Mono', monospace;
+            --color-primary: #0A2E5C; /* Deep Corporate Blue */
+            --color-secondary: #00A3A1; /* Teal Accent */
+            --color-text: #212529;
+            --color-border: #ced4da;
+            --sev-critical: #D92D20;
+            --sev-high: #F79009;
+            --sev-medium: #FDB022;
+            --sev-low: #0086D1;
+            --sev-info: #6c757d;
+        }
+
+        body { font-family: var(--font-en); color: var(--color-text); font-size: 10pt; line-height: 1.6; }
+        @page { size: A4; margin: 1cm 1.5cm; @bottom-center { content: "Page " counter(page); } }
+
+        .bilingual-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .ar, .ar * { font-family: var(--font-ar); text-align: right; direction: rtl; }
+        .en, .en * { text-align: left; direction: ltr; }
+
+        h1, h2, h3, h4, h5, h6 { font-weight: 700; color: var(--color-primary); }
+        code { font-family: var(--font-code); background: #f8f9fa; padding: 2px 4px; border-radius: 4px; border: 1px solid #dee2e6;}
+
+        /* --- Header & Footer --- */
+        .report-header { padding-bottom: 20px; margin-bottom: 20px; border-bottom: 4px solid var(--color-primary); display: grid; grid-template-columns: 1fr 2fr; align-items: center; }
+        .report-header .logo-placeholder { width: 100px; height: 50px; border: 1px dashed #ccc; display:flex; align-items:center; justify-content:center; font-size:8pt; color:#aaa; }
+        .report-header .title-block { border-left: 2px solid var(--color-secondary); padding-left: 20px; }
+        .report-header h1 { font-size: 24pt; margin: 0; }
+        footer { font-family: var(--font-en); text-align: center; font-size: 8pt; color: #999; position: fixed; bottom: 0; left: 0; right: 0; }
+        footer .pagenum:before { content: "{{tr.en.page}} " counter(page) " | "; }
+
+        /* --- Section Titles --- */
+        .section-title h2 { font-size: 18pt; color: var(--color-secondary); border-bottom: 2px solid var(--color-border); padding-bottom: 8px; margin-top: 25px; margin-bottom: 15px; }
+        .page-break { page-break-after: always; }
+
+        /* --- Executive Summary --- */
+        .summary-metric { border: 1px solid var(--color-border); border-radius: 8px; padding: 15px; text-align: center; background: #f8f9fa; }
+        .summary-metric .label { font-size: 9pt; text-transform: uppercase; color: #555; }
+        .summary-metric .value { font-size: 20pt; font-weight: 700; }
+        .summary-metric .value.critical { color: var(--sev-critical); }
+        .executive-text h4 { font-size: 13pt; margin-top: 15px; }
+
+        /* --- Technical Findings --- */
+        .vuln-card { page-break-inside: avoid; border: 1px solid var(--color-border); border-radius: 6px; margin-bottom: 15px; overflow: hidden; }
+        .vuln-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; border-bottom: 1px solid var(--color-border); font-size: 13pt; background: #f8f9fa; }
+        .severity-badge { color: white; padding: 4px 12px; border-radius: 50px; font-size: 10pt; }
+        .vuln-body { padding: 15px; }
+        .vuln-body h5 { font-size: 11pt; font-weight: 700; color: #333; margin: 15px 0 5px 0; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+
+        /* --- Severity --- */
+        .badge-critical { background: var(--sev-critical); } .critical-text { color: var(--sev-critical); }
+        .badge-high { background: var(--sev-high); } .high-text { color: var(--sev-high); }
+        .badge-medium { background: var(--sev-medium); color: #212529 !important; }
+        .badge-low { background: var(--sev-low); }
+    </style>
+</head>
+<body>
+    <footer>
+        <span class="pagenum"></span> <span class="ar"> {{tr.ar.page}} {{ 'counter(page)' | safe }} | </span>{{tr.en.confidential_footer}} | <span class="ar">{{tr.ar.confidential_footer}}</span>
+    </footer>
+
+    <div class="report-header">
+        <div class="logo-placeholder">Your Logo</div>
+        <div class="title-block">
+            <h1 class="en">{{tr.en.security_assessment_report}}</h1>
+            <h1 class="ar">{{tr.ar.security_assessment_report}}</h1>
+            <div class="en">{{tr.en.confidential_report_for}} <code>{{ results.target }}</code></div>
+            <div class="ar">{{tr.ar.confidential_report_for}} <code>{{ results.target }}</code></div>
+        </div>
+    </div>
+
+    <!-- =============== EXECUTIVE SUMMARY =============== -->
+    <div class="section-title bilingual-container">
+        <h2 class="en">{{tr.en.executive_summary}}</h2>
+        <h2 class="ar">{{tr.ar.executive_summary}}</h2>
+    </div>
+    <div class="bilingual-container">
+        <!-- English Section -->
+        <div class="en">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap:15px; margin-bottom:20px;">
+                <div class="summary-metric"><div class="label">{{tr.en.overall_risk_level}}</div><div class="value" style="color:{{ risk_level.color }};">{{ risk_level.text }}</div></div>
+                <div class="summary-metric"><div class="label">{{tr.en.total_vulnerabilities}}</div><div class="value">{{ results.vulnerabilities|length }}</div></div>
+                <div class="summary-metric"><div class="label">{{tr.en.critical_findings}}</div><div class="value critical">{{ chart_data.critical }}</div></div>
+                <div class="summary-metric"><div class="label">{{tr.en.high_findings}}</div><div class="value" style="color:var(--sev-high);">{{ chart_data.high }}</div></div>
+            </div>
+             <div class="executive-text">
+                <h4>{{tr.en.key_observations}}</h4>
+                <p>The security assessment of <strong>{{ results.target }}</strong> identified <strong>{{ results.vulnerabilities|length }}</strong> vulnerabilities, with the most severe findings classified as <strong>{{ risk_level.text }}</strong>. These weaknesses could potentially expose the application to various attacks, including data breaches and service disruption.</p>
+                <h4>{{tr.en.strategic_recommendation}}</h4>
+                <p>It is imperative to prioritize the remediation of all <strong>Critical</strong> and <strong>High</strong> severity vulnerabilities. We recommend allocating immediate technical resources to address the findings outlined in this report to mitigate significant business risks.</p>
+            </div>
+        </div>
+        <!-- Arabic Section -->
+        <div class="ar">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap:15px; margin-bottom:20px;">
+                <div class="summary-metric"><div class="label">{{tr.ar.overall_risk_level}}</div><div class="value" style="color:{{ risk_level.color }};">{{ risk_level.text }}</div></div>
+                <div class="summary-metric"><div class="label">{{tr.ar.total_vulnerabilities}}</div><div class="value">{{ results.vulnerabilities|length }}</div></div>
+                <div class="summary-metric"><div class="label">{{tr.ar.critical_findings}}</div><div class="value critical">{{ chart_data.critical }}</div></div>
+                <div class="summary-metric"><div class="label">{{tr.ar.high_findings}}</div><div class="value high-text">{{ chart_data.high }}</div></div>
+            </div>
+            <div class="executive-text">
+                <h4>{{tr.ar.key_observations}}</h4>
+                <p>كشف التقييم الأمني للهدف <strong>{{ results.target }}</strong> عن <strong>{{ results.vulnerabilities|length }}</strong> ثغرة، وصُنفت أخطرها بمستوى <strong>{{ risk_level.text }}</strong>. هذه النقاط قد تعرض التطبيق لهجمات متنوعة، تشمل تسريب البيانات وتعطيل الخدمة.</p>
+                <h4>{{tr.ar.strategic_recommendation}}</h4>
+                <p>نؤكد على الضرورة القصوى لمعالجة كافة الثغرات ذات الخطورة <strong>الحرجة</strong> و<strong>العالية</strong>. نوصي بتخصيص الموارد التقنية فورًا لمراجعة النتائج المفصلة في هذا التقرير وتطبيق الحلول للحد من المخاطر الجوهرية على الأعمال.</p>
+            </div>
+        </div>
+    </div>
+     <div style="max-width:350px; margin: 20px auto;"><canvas id="severityChart"></canvas></div>
+
+    <div class="page-break"></div>
+
+    <!-- =============== TECHNICAL FINDINGS =============== -->
+    <div class="section-title bilingual-container">
+         <h2 class="en">{{tr.en.technical_findings}}</h2>
+        <h2 class="ar">{{tr.ar.technical_findings}}</h2>
+    </div>
+
+    {% for vuln in results.vulnerabilities %}
+        <div class="vuln-card">
+            <div class="vuln-header">
+                <span class="en" style="font-weight: 700;">{{ vuln.name }}</span>
+                <span class="severity-badge badge-{{ vuln.severity|lower }}">{{ vuln.severity }}</span>
+            </div>
+            <div class="vuln-body">
+                <div class="bilingual-container">
+                    <div class="en"><h5><i class="fas fa-file-alt fa-fw"></i> {{tr.en.description_impact}}</h5><p>{{ vuln.description }}</p></div>
+                    <div class="ar"><h5><i class="fas fa-file-alt fa-fw"></i> {{tr.ar.description_impact}}</h5><p>{{ vuln.description.replace('The application appears to be', 'يبدو أن التطبيق') }}</p></div>
+                </div>
+                <div class="bilingual-container" style="margin-top:10px;">
+                    <div class="en"><h5><i class="fas fa-shield-alt fa-fw"></i> {{tr.en.remediation_steps}}</h5><p>{{ vuln.remediation }}</p></div>
+                    <div class="ar"><h5><i class="fas fa-shield-alt fa-fw"></i> {{tr.ar.remediation_steps}}</h5><p>{{ vuln.remediation.replace('Use parameterized queries', 'استخدم الاستعلامات المعدة مسبقًا') }}</p></div>
+                </div>
+
+                <h5 class="en" style="text-align:left;"><i class="fas fa-microscope fa-fw"></i> {{tr.en.technical_evidence}}</h5>
+                <table style="width: 100%; border-collapse: collapse;">
+                {% for key, value in vuln.evidence.items() %}
+                    <tr><td style="width:150px;font-weight:700;padding:5px; border:1px solid #eee;"><code>{{ key }}</code></td><td style="padding:5px;border:1px solid #eee;"><code>{{ value }}</code></td></tr>
+                {% endfor %}
+                </table>
+            </div>
+        </div>
+    {% endfor %}
+
+    <script>
+        const ctx = document.getElementById('severityChart');
+        Chart.register(ChartDataLabels);
+        new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Critical', 'High', 'Medium', 'Low', 'Info'],
+                datasets: [{
+                    data: [{{ chart_data.critical }}, {{ chart_data.high }}, {{ chart_data.medium }}, {{ chart_data.low }}, {{ chart_data.info }}],
+                    backgroundColor: ['#D92D20', '#F79009', '#FDB022', '#0086D1', '#6c757d'],
+                    borderColor: '#ffffff', borderWidth: 3
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    datalabels: {
+                        formatter: (value, ctx) => {
+                            let sum = 0; let dataArr = ctx.chart.data.datasets[0].data; dataArr.map(data => { sum += data; });
+                            let percentage = (value*100 / sum).toFixed(1) + "%";
+                            return percentage;
+                        },
+                        color: '#fff', font: { weight: 'bold', family: 'Inter', size: 10 }
+                    }
+                },
+                cutout: '60%'
+            }
+        });
+    </script>
+</body>
+</html>
