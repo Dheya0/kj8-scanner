@@ -1,8 +1,3 @@
-# ############################################################################
-# ethical_scanner_v8.0_professional.py
-# (FINAL, CORRECTED & FULLY INTEGRATED VERSION)
-# ############################################################################
-
 # --- 1. Standard Library Imports ---
 import os, re, sys, threading, json, time, socket, logging, uuid, ssl, base64, io
 from datetime import datetime, timezone, timedelta
@@ -15,19 +10,21 @@ import requests
 import urllib3
 import yaml
 import pdfkit
+import redis
 from bs4 import BeautifulSoup, Comment
 from dotenv import load_dotenv
 from googletrans import Translator
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from itsdangerous import URLSafeTimedSerializer
+from waitress import serve
 
 # --- 3. Flask and Extensions ---
 from flask import (Flask, render_template, request, jsonify, session, redirect,
                    url_for, make_response, flash, abort)
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (LoginManager, UserMixin, login_user, logout_user,
-                         login_required, current_user)
+                       login_required, current_user)
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, EqualTo, ValidationError
@@ -48,26 +45,39 @@ load_dotenv()
 current_dir = os.path.dirname(os.path.abspath(__file__))
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# --- [CORRECTED ORDER] ---
+# Step 1: Configure logging FIRST.
+LOG_FILE = 'security_scan_v8.log'
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(threadName)s] %(levelname)s - %(message)s', filename=LOG_FILE, filemode='w')
+logger = logging.getLogger('EthicalScannerV8')
+
 # Security Constants
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_PERIOD = timedelta(minutes=15)
 
-# Flask App Initialization
+# Step 2: Initialize Flask App.
 app = Flask(__name__, template_folder=os.path.join(current_dir, 'templates'), static_folder='static')
+
+# Step 3: Connect to external services (like Redis) now that logger is available.
+try:
+    redis_url = os.getenv('REDIS_URL')
+    if not redis_url:
+        raise ValueError("REDIS_URL environment variable is not set.")
+    redis_client = redis.from_url(redis_url, decode_responses=True) # decode_responses=True is helpful!
+    redis_client.ping()
+    logger.info("Successfully connected to Redis.")
+except (ValueError, redis.exceptions.ConnectionError) as e:
+    logger.critical(f"FATAL: Could not connect to Redis. Aborting scan functionality. Reason: {e}")
+    redis_client = None
+
+# Step 4: Load all other configurations into the Flask app object.
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'a-real-secret-key-is-required-in-env-file')
-#اعدادات قاعده البيانات المحليه
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(current_dir, 'scanner_app.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-######################################################################
-# اعدادات قاعده البيانات على الانترنت Postsql
-
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL or 'sqlite:///' + os.path.join(current_dir, 'scanner_app.db')
-######################################################################
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 # Email Configuration
 app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
 app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
@@ -75,7 +85,7 @@ app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True').lower() in ['true
 app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
 app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 
-# Extensions Initialization
+# Step 5: Initialize Flask extensions.
 mail = Mail(app)
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
@@ -84,55 +94,33 @@ login_manager.login_view = 'login_route'
 login_manager.login_message_category = 'info'
 login_manager.login_message = 'الرجاء تسجيل الدخول للوصول إلى هذه الصفحة.'
 
-# Global Variables for In-Memory Scan Tracking
-active_scans: Dict[str, Dict[str, Any]] = {}
-scan_lock = threading.Lock()
-
-# Logging Configuration
-LOG_FILE = 'security_scan_v8.log'
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(threadName)s] %(levelname)s - %(message)s',
-                    filename=LOG_FILE, filemode='w')
-logger = logging.getLogger('EthicalScannerV8')
-
-# Constants
+# General Constants
 PAYLOADS_DIR = os.path.join(current_dir, 'payloads')
 PAYLOADS_FILE = os.path.join(PAYLOADS_DIR, 'payloads.json')
 SEVERITY_SCORES = {'Critical': 15, 'High': 10, 'Medium': 5, 'Low': 2, 'Info': 0}
 translator = Translator()
-translation_cache = {}
-
-active_scans: Dict[str, Dict[str, Any]] = {}
 
 # --- 6. Helper Functions for Email Confirmation ---
 def generate_confirmation_token(email):
     serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
     return serializer.dumps(email, salt='email-confirm-salt')
 
-
 def confirm_token(token, expiration=3600):
     serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
     try:
-        email = serializer.loads(token, salt='email-confirm-salt', max_age=expiration)
+        return serializer.loads(token, salt='email-confirm-salt', max_age=expiration)
     except Exception:
         return None
-    return email
-
 
 def send_confirmation_email(user_email):
     token = generate_confirmation_token(user_email)
     confirm_url = url_for('confirm_email_route', token=token, _external=True)
     html = render_template('email/activate.html', confirm_url=confirm_url)
-    msg = Message('تأكيد حسابك - الماسح الأمني',
-                  sender=app.config['MAIL_USERNAME'],
-                  recipients=[user_email],
-                  html=html)
+    msg = Message('تأكيد حسابك - الماسح الأمني', sender=app.config['MAIL_USERNAME'], recipients=[user_email], html=html)
     try:
         mail.send(msg)
     except Exception as e:
         logger.error(f"Failed to send confirmation email to {user_email}: {e}")
-        # Consider adding a fallback or user notification here
-        pass
-
 
 # --- 7. Database Models ---
 class User(db.Model, UserMixin):
@@ -153,14 +141,12 @@ class User(db.Model, UserMixin):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
-
 class Scan(db.Model):
     id = db.Column(db.String(36), primary_key=True)
     target_url = db.Column(db.String(2048), nullable=False)
     status = db.Column(db.String(20), nullable=False, default='queued')
     results = db.Column(db.Text, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-
 
 # --- 8. Forms ---
 class RegistrationForm(FlaskForm):
@@ -186,12 +172,21 @@ class RegistrationForm(FlaskForm):
         if User.query.filter_by(email=email.data).first():
             raise ValidationError('هذا البريد الإلكتروني مستخدم بالفعل.')
 
-
 class LoginForm(FlaskForm):
     email = StringField('البريد الإلكتروني', validators=[DataRequired(), Email()])
     password = PasswordField('كلمة المرور', validators=[DataRequired()])
     submit = SubmitField('تسجيل الدخول')
 
+class TwoFaForm(FlaskForm):
+    otp = StringField('رمز المصادقة', validators=[DataRequired()])
+    submit = SubmitField('تحقق')
+
+# --- 9. Flask-Login Loader ---
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+# ####
 
 class TwoFaForm(FlaskForm):
     otp = StringField('رمز المصادقة', validators=[DataRequired()])
@@ -223,7 +218,6 @@ class ScannerModule:
     def __init__(self, scanner_core):
         self.core = scanner_core
         self.logger = logging.getLogger(self.__class__.__name__)
-
     def run(self):
         raise NotImplementedError("Each module must implement the 'run' method.")
 
@@ -243,20 +237,50 @@ class EthicalSecurityScannerV7:
         self.vulnerability_lock = threading.Lock()
         self.payloads = self.load_payloads()
         self.stored_xss_nonces: Dict[str, Dict] = {}
+        self.log_buffer = []
+        self.log_buffer_lock = threading.Lock()
 
+    # في فئة EthicalSecurityScannerV7
     def _create_session(self) -> requests.Session:
+        """
+        Creates a new requests.Session with an optimized transport adapter.
+        This increases the connection pool size to handle high concurrency.
+        """
+        # 1. احصل على عدد الخيوط (threads) من إعدادات الفحص
+        # هذا يضمن أن حجم المجمع يتناسب مع عدد المهام التي سيتم تشغيلها
+        pool_size = int(self.options.get('thread_count', os.cpu_count() or 4))
+
+        # تأكد من وجود قيمة دنيا لمنع الأخطاء
+        pool_size = max(pool_size, 10)
+
+        self.logger.info(f"Initializing requests session with connection pool size of {pool_size}")
+
+        # 2. أنشئ محول (Adapter) جديدًا بالإعدادات المخصصة
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=pool_size,
+            pool_maxsize=pool_size
+        )
+
+        # 3. أنشئ كائن الجلسة
         s = requests.Session()
+
+        # 4. اربط المحول (Mount) بجميع الطلبات التي تبدأ بـ http:// و https://
+        s.mount('http://', adapter)
+        s.mount('https://', adapter)
+
+        # بقية إعدادات الجلسة كما هي
         s.headers.update({'User-Agent': os.getenv('SCANNER_USER_AGENT', 'EthicalScanner/8.0')})
         s.verify = False
-        s.timeout = int(self.options.get('timeout', 10))
+        s.timeout = int(self.options.get('timeout', 8))
+
         custom_headers_str = self.options.get('custom_headers', '{}')
         if custom_headers_str.strip():
             try:
                 s.headers.update(json.loads(custom_headers_str))
             except json.JSONDecodeError:
                 self.logger.error("Invalid JSON for custom headers.")
-        return s
 
+        return s
     def _initialize_results(self) -> Dict[str, Any]:
         return {"scan_id": self.scan_id, "target": self.target_url, "scan_time": datetime.now(timezone.utc).isoformat(),
                 "vulnerabilities": [], "risk_score": 0,
@@ -281,17 +305,54 @@ class EthicalSecurityScannerV7:
                 db.session.commit()
 
             self._update_progress(1, "Scan initialized...")
-            self._perform_automated_login()
             selected_modules = self.options.getlist('modules') if hasattr(self.options, 'getlist') else []
-            self._run_recon_modules(selected_modules)
-            self._run_independent_modules(selected_modules)
-            dependent_modules = ['SQLInjectionModuleV5', 'XSSModuleV5', 'InformationDisclosureModule', 'SSRFModule',
-                                 'SSTIModule', 'CommandInjectionModule', 'LFIModule']
-            if any(m in selected_modules for m in dependent_modules):
-                self._update_progress(30, "Phase 3: Deep Crawl & Injection...")
-                CrawlerModuleV5(self).run()
-                self._run_injection_modules(selected_modules)
-                # ... (Additional phases for Stored XSS and Business Logic)
+
+
+            # هذه هي الوحدات التي تعتمد على الروابط والنماذج التي يجدها الزاحف
+            dependent_modules_map = {
+                'InformationDisclosureModule': InformationDisclosureModule,
+                'SQLInjectionModuleV5': SQLInjectionModuleV5,
+                'XSSModuleV5': XSSModuleV5,
+                'SSRFModule': SSRFModule,
+                'SSTIModule': SSTIModule,
+                'CommandInjectionModule': CommandInjectionModule,
+                'LFIModule': LFIModule,
+                'BusinessLogicModule': BusinessLogicModule
+            }
+
+            # --- الأداء المحسن: تشغيل المهام المتزامنة بذكاء ---
+            max_workers = int(self.options.get('thread_count', os.cpu_count() or 4))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+                # 1. ابدأ بتشغيل جميع الوحدات المستقلة فورًا وبالتوازي
+                futures = []
+                executor.submit(self._perform_automated_login)  # تسجيل الدخول يتم بالتوازي
+
+                for name, cls in dependent_modules_map.items():
+                    if name in selected_modules:
+                        self.logger.info(f"Submitting independent module: {name}")
+                        futures.append(executor.submit(cls(self).run))
+
+                # 2. انتظر فقط حتى تنتهي المهام المستقلة إذا كانت هناك مهام تعتمد عليها
+                for future in futures:
+                    future.result()
+
+                # 3. الآن، قم بتشغيل الزاحف ثم الوحدات المعتمدة عليه
+                run_dependent = any(name in selected_modules for name in dependent_modules_map.keys())
+                if run_dependent:
+                    self._update_progress(30, "Phase 2: Crawling application...")
+                    CrawlerModuleV5(self).run()
+
+                    dependent_futures = []
+                    for name, cls in dependent_modules_map.items():
+                        if name in selected_modules:
+                            self.logger.info(f"Submitting dependent module: {name}")
+                            dependent_futures.append(executor.submit(cls(self).run))
+
+                    # انتظر حتى تنتهي جميع مهام الحقن
+                    for future in dependent_futures:
+                        future.result()
+
             self._update_progress(95, "Scan phases complete. Finalizing...")
         except Exception as e:
             self.logger.critical(f"CRITICAL ERROR in scan {self.scan_id}: {e}", exc_info=True)
@@ -303,10 +364,8 @@ class EthicalSecurityScannerV7:
         self.results["scan_stats"]["end_time"] = time.time()
         self.results["scan_stats"]["duration"] = self.results["scan_stats"]["end_time"] - self.results["scan_stats"][
             "start_time"]
-        with scan_lock:
-            if self.scan_id in active_scans:
-                active_scans[self.scan_id]['status'] = status
-                active_scans[self.scan_id]['results'] = self.results
+        if redis_client:
+            redis_client.hset(f"scan:{self.scan_id}", 'status', status)
         try:
             with self.app.app_context():
                 scan_to_update = Scan.query.get(self.scan_id)
@@ -355,6 +414,28 @@ class EthicalSecurityScannerV7:
             if driver:
                 driver.quit()
 
+    def _update_progress(self, progress: int, message: str):
+        if redis_client:
+            log_message = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+
+            with self.log_buffer_lock:
+                self.log_buffer.append(log_message)
+                # Flush the buffer to Redis only when it reaches a certain size,
+                # or when progress is updated, to avoid too many network calls.
+                should_flush = (len(self.log_buffer) >= 20) or (progress > -1)
+
+                if should_flush:
+                    pipe = redis_client.pipeline()
+                    # Only update progress if a valid value is given
+                    if progress > -1:
+                        pipe.hset(f"scan:{self.scan_id}", 'progress', min(progress, 100))
+
+                    if self.log_buffer:
+                        pipe.rpush(f"scan_log:{self.scan_id}", *self.log_buffer)
+
+                    pipe.execute()
+                    self.log_buffer.clear()  # Clear the buffer after flushing
+
     def _run_modules_concurrently(self, modules_to_run: List[ScannerModule]):
         if not modules_to_run: return
         max_workers = int(self.options.get('thread_count', os.cpu_count() or 4))
@@ -362,8 +443,8 @@ class EthicalSecurityScannerV7:
             executor.map(lambda mod: mod.run(), modules_to_run)
 
     def _run_recon_modules(self, selected):
-        modules = {'PortScanningModule': PortScanningModule, 'DirectoryBruteforceModule': DirectoryBruteforceModule,
-                   'APIDiscoveryModule': APIDiscoveryModule}
+        modules = {'PortScanningModule': PortScanningModule, 'DirectoryBruteforceModule': DirectoryBruteforceModule}
+                  # 'APIDiscoveryModule': APIDiscoveryModule} #API
         self._run_modules_concurrently([cls(self) for name, cls in modules.items() if name in selected])
 
     def _run_independent_modules(self, selected):
@@ -402,12 +483,6 @@ class EthicalSecurityScannerV7:
             self.results['vulnerabilities'].append(entry)
             self.results['risk_score'] += SEVERITY_SCORES.get(severity, 0)
 
-    def _update_progress(self, progress: int, message: str):
-        with scan_lock:
-            if self.scan_id in active_scans:
-                active_scans[self.scan_id]['progress'] = min(progress, 100)
-                active_scans[self.scan_id]['log'].append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-
 
 # ############################################################################
 # --- Scanner Modules (Full Code for All Modules) ---
@@ -442,28 +517,91 @@ class PortScanningModule(ScannerModule):
                                         "Review and close any non-essential ports.",
                                         {'host': self.core.domain, 'ip': target_ip,
                                          'open_ports': list(open_ports.keys())})
-
-
+#API
+# class APIDiscoveryModule(ScannerModule):
+#     def run(self):
+#         self.core._update_progress(8, "Searching for API specification files...")
+#         # قائمة بالمسارات الشائعة لملفات تعريف API
+#         common_api_paths = [
+#             '/swagger.json', '/openapi.json', '/api/swagger.json', '/api/openapi.json',
+#             '/v1/swagger.json', '/v2/swagger.json', '/api/v1/swagger.json',
+#             '/swagger/v1/swagger.json',
+#             '/swagger.yaml', '/openapi.yaml'
+#         ]
+#
+#         for path in common_api_paths:
+#             spec_url = urljoin(self.core.target_url, path)
+#             response = self.core.make_request('get', spec_url)
+#
+#             if response and response.status_code == 200:
+#                 self.logger.warning(f"Found potential API specification file at: {spec_url}")
+#                 try:
+#                     if spec_url.endswith('.json'):
+#                         spec_data = response.json()
+#                     elif spec_url.endswith(('.yaml', '.yml')):
+#                         spec_data = yaml.safe_load(response.text)
+#                     else:
+#                         continue  # غير مدعوم
+#
+#                     self._parse_api_spec(spec_data)
+#                     # وجدنا ملفًا، لا داعي لمواصلة البحث (يمكن تحسين هذا لاحقًا)
+#                     break
+#                 except (json.JSONDecodeError, yaml.YAMLError) as e:
+#                     self.logger.error(f"Failed to parse API specification file {spec_url}: {e}")
+#
+#     def _parse_api_spec(self, spec_data):
+#         """يحلل ملف OpenAPI/Swagger ويضيف نقاط النهاية إلى قائمة الفحص."""
+#         paths = spec_data.get('paths', {})
+#         self.logger.info(f"Parsing {len(paths)} API paths from specification file.")
+#
+#         for path, methods in paths.items():
+#             full_path_url = urljoin(self.core.target_url, path)
+#             # إضافة الرابط إلى قائمة الزحف العامة
+#             self.core.results['context']['urls_found'].add(full_path_url)
+#
+#             for method, details in methods.items():
+#                 # بالنسبة لواجهات API، لا يوجد "نموذج" بالمعنى التقليدي
+#                 # سنقوم بإنشاء "شبه نموذج" لتمثيل نقطة النهاية
+#                 inputs = []
+#                 for param in details.get('parameters', []):
+#                     # نستخرج اسم الپارامتر ومكانه (query, header, path, body)
+#                     inputs.append({'name': param.get('name'), 'type': 'api', 'in': param.get('in')})
+#
+#                 # إنشاء سجل شبيه بالنموذج ليتم اختباره لاحقًا
+#                 api_endpoint_form = {
+#                     'url': full_path_url,
+#                     'method': method.lower(),
+#                     'inputs': inputs,
+#                     'source_page': 'API Specification'
+#                 }
+#
+#                 if api_endpoint_form not in self.core.results['context']['forms_found']:
+#                     self.core.results['context']['forms_found'].append(api_endpoint_form)
+#
+#         self.logger.info(
+#             f"Added {len(self.core.results['context']['forms_found'])} new API endpoints to the scan queue.")
 class DirectoryBruteforceModule(ScannerModule):
     def run(self):
         self.core._update_progress(10, f"Directory Bruteforcing {self.core.target_url}...")
-        paths = ["admin", "login", "dashboard", "test", "api", "uploads", "backup", "wp-admin", ".git", ".env",
-                 "config"]
-        with ThreadPoolExecutor(max_workers=30) as e:
-            e.map(self.check_path, paths)
+        paths = ["admin", "login", "dashboard", "test", "api", "uploads", "backup", "wp-admin", ".git", ".env", "config"]
+        max_workers = max(1, int(self.core.options.get('thread_count', os.cpu_count() or 4)) // 2)
+        self.logger.info(f"DirectoryBruteforceModule is using {max_workers} worker threads.")
 
+        with ThreadPoolExecutor(max_workers=max_workers) as e:
+            e.map(self.check_path, paths)
     def check_path(self, path):
         url = urljoin(self.core.target_url, path)
         try:
-            res = self.core.session.head(url, timeout=5, allow_redirects=False)
-            if res.status_code in [200, 301, 302, 401, 403]:
+            res = self.core.make_request('head', url, timeout=5, allow_redirects=False)
+            if res and res.status_code in [200, 301, 302, 401, 403]:
+            # Using a lock here is fine because discoveries are rare events.
                 with self.core.vulnerability_lock:
                     self.core.results['context']['interesting_paths'].append(url)
                     self.core.add_vulnerability("Interesting Path Discovered", "Low",
                                                 f"Found potentially sensitive path: {url}", "CWE-538",
                                                 "Ensure unnecessary files are not publicly accessible.",
                                                 {'path': url, 'status': res.status_code})
-        except requests.RequestException:
+        except Exception:
             pass
 
 
@@ -504,68 +642,6 @@ class CrawlerModuleV5(ScannerModule):
         return {'url': form_url, 'method': method, 'inputs': inputs}
 
 
-class APIDiscoveryModule(ScannerModule):
-    def run(self):
-        self.core._update_progress(8, "Searching for API specification files...")
-        # قائمة بالمسارات الشائعة لملفات تعريف API
-        common_api_paths = [
-            '/swagger.json', '/openapi.json', '/api/swagger.json', '/api/openapi.json',
-            '/v1/swagger.json', '/v2/swagger.json', '/api/v1/swagger.json',
-            '/swagger/v1/swagger.json',
-            '/swagger.yaml', '/openapi.yaml'
-        ]
-
-        for path in common_api_paths:
-            spec_url = urljoin(self.core.target_url, path)
-            response = self.core.make_request('get', spec_url)
-
-            if response and response.status_code == 200:
-                self.logger.warning(f"Found potential API specification file at: {spec_url}")
-                try:
-                    if spec_url.endswith('.json'):
-                        spec_data = response.json()
-                    elif spec_url.endswith(('.yaml', '.yml')):
-                        spec_data = yaml.safe_load(response.text)
-                    else:
-                        continue  # غير مدعوم
-
-                    self._parse_api_spec(spec_data)
-                    # وجدنا ملفًا، لا داعي لمواصلة البحث (يمكن تحسين هذا لاحقًا)
-                    break
-                except (json.JSONDecodeError, yaml.YAMLError) as e:
-                    self.logger.error(f"Failed to parse API specification file {spec_url}: {e}")
-
-    def _parse_api_spec(self, spec_data):
-        """يحلل ملف OpenAPI/Swagger ويضيف نقاط النهاية إلى قائمة الفحص."""
-        paths = spec_data.get('paths', {})
-        self.logger.info(f"Parsing {len(paths)} API paths from specification file.")
-
-        for path, methods in paths.items():
-            full_path_url = urljoin(self.core.target_url, path)
-            # إضافة الرابط إلى قائمة الزحف العامة
-            self.core.results['context']['urls_found'].add(full_path_url)
-
-            for method, details in methods.items():
-                # بالنسبة لواجهات API، لا يوجد "نموذج" بالمعنى التقليدي
-                # سنقوم بإنشاء "شبه نموذج" لتمثيل نقطة النهاية
-                inputs = []
-                for param in details.get('parameters', []):
-                    # نستخرج اسم الپارامتر ومكانه (query, header, path, body)
-                    inputs.append({'name': param.get('name'), 'type': 'api', 'in': param.get('in')})
-
-                # إنشاء سجل شبيه بالنموذج ليتم اختباره لاحقًا
-                api_endpoint_form = {
-                    'url': full_path_url,
-                    'method': method.lower(),
-                    'inputs': inputs,
-                    'source_page': 'API Specification'
-                }
-
-                if api_endpoint_form not in self.core.results['context']['forms_found']:
-                    self.core.results['context']['forms_found'].append(api_endpoint_form)
-
-        self.logger.info(
-            f"Added {len(self.core.results['context']['forms_found'])} new API endpoints to the scan queue.")
 class SQLInjectionModuleV5(ScannerModule):
     # [FIX] Refactored module for better clarity and to add CVEs
     def run(self):
@@ -647,68 +723,78 @@ class SQLInjectionModuleV5(ScannerModule):
 class XSSModuleV5(ScannerModule):
     # [FIX] Refactored module with better false-positive reduction
     def run(self):
+        # اختبار الروابط التي تحتوي على پارامترات
         for url in list(self.core.results['context']['urls_found']):
             if '?' in url:
-                params = parse_qs(urlparse(url).query)
-                for param in params:
-                    self._test(url, 'get', param, {'params': params})
-        for form in list(self.core.results['context']['forms_found']):
-            for field in form['inputs']:
-                if param := field.get('name'):
-                    self._test(form['url'], form['method'], param, {'inputs': form['inputs']})
+                parsed_url = urlparse(url)
+                params = parse_qs(parsed_url.query)
+                for param_name in params:
+                    # نمرر الـ url والـ params
+                    self._test(url, 'get', param_name, params)
 
-    def _test(self, url, method, param, context):
+        # اختبار النماذج
+        for form in list(self.core.results['context']['forms_found']):
+            data_payload = {field.get('name'): 'test' for field in form['inputs'] if field.get('name')}
+            for field in form['inputs']:
+                if param_name := field.get('name'):
+                    # نمرر الـ url الخاص بالنموذج وحمولة البيانات
+                    self._test(form['url'], form['method'], param_name, data_payload)
+
+    def _test(self, url, method, param_to_test, base_payload):
         xss_payloads = self.core.payloads.get('xss', [])
 
-        # Test for Reflected XSS
+        # --- Test for Reflected XSS ---
         reflected_p_data = next((p for p in xss_payloads if p['type'] == 'reflected'), None)
         if reflected_p_data:
             nonce = f"xss-{uuid.uuid4().hex[:6]}"
-            payload = reflected_p_data['value'].replace('{{nonce}}', nonce)
+            payload_value = reflected_p_data['value'].replace('{{nonce}}', nonce)
+
+            # --- [CORRECTED LOGIC] ---
+            # ننشئ نسخة من الحمولة الأساسية لتعديلها
+            injected_payload = base_payload.copy()
+            # نضع الحمولة الخبيثة في الپارامتر المستهدف
+            injected_payload[param_to_test] = payload_value
 
             if method.lower() == 'get':
-                params = context['params'].copy();
-                params[param] = [payload]
-                test_url = urlunparse(urlparse(url)._replace(query=urlencode(params, doseq=True)))
+                # بالنسبة لطلبات GET, الحمولة تكون في پارامترات الرابط
+                test_url = urlunparse(urlparse(url)._replace(query=urlencode(injected_payload, doseq=True)))
                 response = self.core.make_request('get', test_url)
             else:  # POST
-                data = {p['name']: 'test' for p in context['inputs'] if p.get('name')};
-                data[param] = payload
+                # بالنسبة لطلبات POST, الحمولة تكون في جسم الطلب (data)
                 test_url = url
-                response = self.core.make_request('post', test_url, data=data)
+                response = self.core.make_request('post', test_url, data=injected_payload)
 
-            if response and payload in response.text and 'text/html' in response.headers.get('Content-Type', ''):
+            if response and payload_value in response.text and 'text/html' in response.headers.get('Content-Type', ''):
                 soup = BeautifulSoup(response.text, 'html.parser')
-                # If the payload is found as a plain string, it's likely escaped and safe.
-                # If it's not found as a string, it might have been rendered as a tag, which is dangerous.
-                if not soup.find(string=lambda text: payload in text):
+                if not soup.find(string=lambda text: payload_value in text):
                     cwe = reflected_p_data.get('cwe', 'CWE-79')
                     cve = reflected_p_data.get('cve_example')
                     self.core.add_vulnerability("Reflected XSS", "High",
-                                                f"Payload reflected for parameter '{param}' and was rendered by the browser.",
+                                                f"Payload reflected for parameter '{param_to_test}' and was rendered by the browser.",
                                                 cwe,
                                                 "Implement context-aware output encoding for all user-supplied data.",
-                                                {'url': test_url, 'method': method, 'parameter': param,
-                                                 'payload': payload}, cve=cve)
-                    return  # Found a reflected XSS, no need to check for stored on this param
+                                                {'url': test_url, 'method': method, 'parameter': param_to_test,
+                                                 'payload': payload_value}, cve=cve)
+                    # وجدنا ثغرة، لا داعي لاختبار الأنواع الأخرى على نفس الپارامتر
+                    return
 
-        # Test for Stored XSS
+        # --- Test for Stored XSS ---
         stored_p_data = next((p for p in xss_payloads if p['type'] == 'stored'), None)
         if stored_p_data:
             nonce = f"st-xss-{uuid.uuid4().hex[:8]}"
-            payload = stored_p_data['value'].replace('{{nonce}}', nonce)
-            self.core.stored_xss_nonces[nonce] = {'injection_url': url, 'method': method, 'parameter': param,
-                                                  'payload': payload}
+            payload_value = stored_p_data['value'].replace('{{nonce}}', nonce)
+
+            self.core.stored_xss_nonces[nonce] = {'injection_url': url, 'method': method, 'parameter': param_to_test,
+                                                  'payload': payload_value}
+
+            injected_payload = base_payload.copy()
+            injected_payload[param_to_test] = payload_value
+
             if method.lower() == 'get':
-                params = context['params'].copy();
-                params[param] = [payload]
-                test_url = urlunparse(urlparse(url)._replace(query=urlencode(params, doseq=True)))
+                test_url = urlunparse(urlparse(url)._replace(query=urlencode(injected_payload, doseq=True)))
                 self.core.make_request('get', test_url)
             else:  # POST
-                data = {p['name']: 'test' for p in context['inputs'] if p.get('name')};
-                data[param] = payload
-                self.core.make_request('post', url, data=data)
-
+                self.core.make_request('post', url, data=injected_payload)
 
 class FingerprintModule(ScannerModule):
     def run(self):
@@ -904,31 +990,37 @@ class SSRFModule(ScannerModule):
 
 
 class SSTIModule(ScannerModule):
-    # ... (Code is unchanged) ...
     def run(self):
         targets = []
         [targets.append({'type': 'url', 'url': url}) for url in list(self.core.results['context']['urls_found']) if
          '?' in url]
         [targets.append({'type': 'form', 'details': form}) for form in
          list(self.core.results['context']['forms_found'])]
+
         for target in targets:
+            # [CORRECTED LOGIC] Handle URL parameters (GET)
             if target['type'] == 'url':
-                for param in parse_qs(urlparse(target['url']).query): self._test_param(target['url'], 'get', param, {
-                    'params': parse_qs(urlparse(target['url']).query)})
+                parsed_url = urlparse(target['url'])
+                params_context = {'params': parse_qs(parsed_url.query)}
+                for param in params_context['params']:
+                    self._test_param(target['url'], 'get', param, params_context)
+
+            # [CORRECTED LOGIC] Handle Form parameters (POST/GET)
             elif target['type'] == 'form':
-                for field in target['details']['inputs']:
+                form_details = target['details']
+                inputs_context = {'inputs': form_details['inputs']}
+                for field in form_details['inputs']:
                     if param := field.get('name'):
-                        self._test_param(target['details']['url'], target['details']['method'], param,
-                                         {'inputs': target['details']['inputs']})
+                        self._test_param(form_details['url'], form_details['method'], param, inputs_context)
 
     def _send_payload(self, url, method, param, payload, context):
         if method.lower() == 'get':
-            params = context['params'].copy();
+            params = context.get('params', {}).copy()
             params[param] = [payload]
             test_url = urlunparse(urlparse(url)._replace(query=urlencode(params, doseq=True)))
             return self.core.make_request('get', test_url), test_url
-        else:
-            data = {p['name']: 'test' for p in context.get('inputs', []) if p.get('name')};
+        else:  # POST
+            data = {p.get('name'): 'test' for p in context.get('inputs', []) if p.get('name')}
             data[param] = payload
             return self.core.make_request(method, url, data=data), url
 
@@ -948,8 +1040,68 @@ class SSTIModule(ScannerModule):
                                             {'url': test_url, 'parameter': param, 'payload': payload}, cve=cve)
                 return
 
+class LFIModule(ScannerModule):
+    def run(self):
+        targets = []
+        [targets.append({'type': 'url', 'url': url}) for url in list(self.core.results['context']['urls_found']) if
+         '?' in url]
+        [targets.append({'type': 'form', 'details': form}) for form in
+         list(self.core.results['context']['forms_found'])]
 
-# <<< [ENHANCEMENT] New Module: Command Injection >>>
+        for target in targets:
+            # [CORRECTED LOGIC] Handle URL parameters (GET)
+            if target['type'] == 'url':
+                parsed_url = urlparse(target['url'])
+                params_context = {'params': parse_qs(parsed_url.query)}
+                for param in params_context['params']:
+                    self._test_param(target['url'], 'get', param, params_context)
+
+            # [CORRECTED LOGIC] Handle Form parameters (POST/GET)
+            elif target['type'] == 'form':
+                form_details = target['details']
+                inputs_context = {'inputs': form_details['inputs']}
+                for field in form_details['inputs']:
+                    if param := field.get('name'):
+                        self._test_param(form_details['url'], form_details['method'], param, inputs_context)
+
+    def _send_payload(self, url, method, param, payload, context):
+        if method.lower() == 'get':
+            params = context.get('params', {}).copy()
+            params[param] = [payload]
+            test_url = urlunparse(urlparse(url)._replace(query=urlencode(params, doseq=True)))
+            return self.core.make_request('get', test_url), test_url
+        else:  # POST
+            data = {p.get('name'): 'test' for p in context.get('inputs', []) if p.get('name')}
+            data[param] = payload
+            return self.core.make_request(method, url, data=data), url
+
+    def _test_param(self, url, method, param, context):
+        lfi_payloads = self.core.payloads.get('lfi', [])
+        success_signatures = {"/etc/passwd": "root:x:0:0", "boot.ini": "[boot loader]", "php://filter": "PD9waH"}
+
+        for p_data in lfi_payloads:
+            payload = p_data['value']
+            cwe = p_data.get('cwe', 'CWE-98')
+            cve = p_data.get('cve_example')
+
+            response, test_url = self._send_payload(url, method, param, payload, context)
+            if not response: continue
+
+            signature_key = next((key for key in success_signatures if key in payload), None)
+            if signature_key and success_signatures[signature_key] in response.text:
+                self.core.add_vulnerability("Local File Inclusion (LFI)", "High",
+                                            "The application includes local files from the server based on user input. This can lead to sensitive information disclosure or Remote Code Execution.",
+                                            cwe,
+                                            "Avoid passing user-controlled data to file inclusion functions. Maintain a strict allow-list of files that can be included and validate all input.",
+                                            {'url': test_url, 'parameter': param, 'payload': payload,
+                                             'method': method.upper(),
+                                             'confirmation': f"Found signature '{success_signatures[signature_key]}'."},
+                                            cve=cve)
+                return
+
+
+#### --- 2. المُصحَّح: `CommandInjectionModule` ---
+
 class CommandInjectionModule(ScannerModule):
     def run(self):
         targets = []
@@ -959,23 +1111,29 @@ class CommandInjectionModule(ScannerModule):
          list(self.core.results['context']['forms_found'])]
 
         for target in targets:
+            # [CORRECTED LOGIC] Handle URL parameters (GET)
             if target['type'] == 'url':
-                for param in parse_qs(urlparse(target['url']).query): self._test_param(target['url'], 'get', param, {
-                    'params': parse_qs(urlparse(target['url']).query)})
+                parsed_url = urlparse(target['url'])
+                params_context = {'params': parse_qs(parsed_url.query)}
+                for param in params_context['params']:
+                    self._test_param(target['url'], 'get', param, params_context)
+
+            # [CORRECTED LOGIC] Handle Form parameters (POST/GET)
             elif target['type'] == 'form':
-                for field in target['details']['inputs']:
+                form_details = target['details']
+                inputs_context = {'inputs': form_details['inputs']}
+                for field in form_details['inputs']:
                     if param := field.get('name'):
-                        self._test_param(target['details']['url'], target['details']['method'], param,
-                                         {'inputs': target['details']['inputs']})
+                        self._test_param(form_details['url'], form_details['method'], param, inputs_context)
 
     def _send_payload(self, url, method, param, payload, context):
         if method.lower() == 'get':
-            params = context['params'].copy();
+            params = context.get('params', {}).copy()
             params[param] = [payload]
             test_url = urlunparse(urlparse(url)._replace(query=urlencode(params, doseq=True)))
             return self.core.make_request('get', test_url), test_url
         else:  # POST
-            data = {p['name']: 'test' for p in context.get('inputs', []) if p.get('name')};
+            data = {p.get('name'): 'test' for p in context.get('inputs', []) if p.get('name')}
             data[param] = payload
             return self.core.make_request(method, url, data=data), url
 
@@ -986,7 +1144,7 @@ class CommandInjectionModule(ScannerModule):
         for p_data in cmd_payloads:
             payload = p_data['value']
             cwe = p_data.get('cwe', 'CWE-77')
-            cve = p_data.get('cve_example')  # e.g., "CVE-2014-6271" (Shellshock)
+            cve = p_data.get('cve_example')
 
             if p_data['type'] == 'blind':
                 response, test_url = self._send_payload(url, method, param, payload, context)
@@ -1014,7 +1172,6 @@ class CommandInjectionModule(ScannerModule):
                                                     {'url': url, 'parameter': param, 'payload': payload,
                                                      'method': method.upper()}, cve=cve)
                         return
-
 
 # <<< جديد: وحدة فحص منطق العمل المتقدمة >>>
 class BusinessLogicModule(ScannerModule):
@@ -1141,27 +1298,33 @@ class BusinessLogicModule(ScannerModule):
         return response
 
     def _extract_context(self, step: dict, response: requests.Response, context: dict):
-        """يستخلص البيانات من استجابة HTTP ويضيفها إلى قاموس السياق."""
         extractions = step.get('extract', {})
 
         for var_name, extract_rule in extractions.items():
             source = extract_rule.get('from')
-            path = extract_rule.get('path')
 
             extracted_value = None
             if source == 'json_body':
                 try:
                     # منطق بسيط لاستخلاص البيانات من JSON. يمكن جعله أكثر تعقيدًا لاحقًا.
                     data = response.json()
-                    keys = path.split('.')
+                    keys = os.path.split('.')
                     value = data
                     for key in keys:
                         value = value[key]
                     extracted_value = value
                 except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    self.logger.warning(f"  - Could not extract '{path}' from JSON body: {e}")
+                    self.logger.warning(f"  - Could not extract '{os.path}' from JSON body: {e}")
             elif source == 'header':
-                extracted_value = response.headers.get(path)
+                extracted_value = response.headers.get(os.path)
+            elif source == 'body_regex':
+                regex = extract_rule.get('regex')
+                if regex:
+                    match = re.search(regex, response.text)
+                    if match and match.groups():
+                        extracted_value = match.group(1)  # استخلاص أول مجموعة مطابقة
+                    else:
+                        self.logger.warning(f"  - Regex '{regex}' did not find any match or capture group.")
 
             if extracted_value is not None:
                 context[var_name] = extracted_value
@@ -1318,60 +1481,6 @@ class BusinessLogicModule(ScannerModule):
             return data
 
 
-class LFIModule(ScannerModule):
-    def run(self):
-        targets = []
-        [targets.append({'type': 'url', 'url': url}) for url in list(self.core.results['context']['urls_found']) if
-         '?' in url]
-        [targets.append({'type': 'form', 'details': form}) for form in
-         list(self.core.results['context']['forms_found'])]
-
-        for target in targets:
-            if target['type'] == 'url':
-                for param in parse_qs(urlparse(target['url']).query): self._test_param(target['url'], 'get', param, {
-                    'params': parse_qs(urlparse(target['url']).query)})
-            elif target['type'] == 'form':
-                for field in target['details']['inputs']:
-                    if param := field.get('name'):
-                        self._test_param(target['details']['url'], target['details']['method'], param,
-                                         {'inputs': target['details']['inputs']})
-
-    def _send_payload(self, url, method, param, payload, context):
-        if method.lower() == 'get':
-            params = context['params'].copy();
-            params[param] = [payload]
-            test_url = urlunparse(urlparse(url)._replace(query=urlencode(params, doseq=True)))
-            return self.core.make_request('get', test_url), test_url
-        else:  # POST
-            data = {p['name']: 'test' for p in context.get('inputs', []) if p.get('name')};
-            data[param] = payload
-            return self.core.make_request(method, url, data=data), url
-
-    def _test_param(self, url, method, param, context):
-        lfi_payloads = self.core.payloads.get('lfi', [])
-        success_signatures = {"/etc/passwd": "root:x:0:0", "boot.ini": "[boot loader]", "php://filter": "PD9waH"}
-
-        for p_data in lfi_payloads:
-            payload = p_data['value']
-            cwe = p_data.get('cwe', 'CWE-98')
-            cve = p_data.get('cve_example')
-
-            response, test_url = self._send_payload(url, method, param, payload, context)
-            if not response: continue
-
-            signature_key = next((key for key in success_signatures if key in payload), None)
-            if signature_key and success_signatures[signature_key] in response.text:
-                self.core.add_vulnerability("Local File Inclusion (LFI)", "High",
-                                            "The application includes local files from the server based on user input. This can lead to sensitive information disclosure or Remote Code Execution.",
-                                            cwe,
-                                            "Avoid passing user-controlled data to file inclusion functions. Maintain a strict allow-list of files that can be included and validate all input.",
-                                            {'url': test_url, 'parameter': param, 'payload': payload,
-                                             'method': method.upper(),
-                                             'confirmation': f"Found signature '{success_signatures[signature_key]}'."},
-                                            cve=cve)
-                return
-
-
 # ############################################################################
 # --- دوال ومسارات تطبيق Flask ---
 # ############################################################################
@@ -1446,10 +1555,14 @@ def login_route():
             return render_template('login.html', title='تسجيل الدخول', form=form)
 
         if user.check_password(form.password.data):
-            # --- الجزء الجديد: التحقق من تأكيد البريد ---
             if not user.is_email_confirmed:
                 flash('الرجاء تأكيد بريدك الإلكتروني أولاً قبل تسجيل الدخول.', 'warning')
                 return redirect(url_for('login_route'))
+
+            user.failed_login_attempts = 0
+            user.last_failed_login = None
+            db.session.commit()
+
             if user.is_2fa_enabled:
                 session['user_id_for_2fa'] = user.id
                 return redirect(url_for('verify_2fa_route'))
@@ -1458,7 +1571,7 @@ def login_route():
                 next_page = request.args.get('next')
                 return redirect(next_page or url_for('index_route'))
         else:
-            user.failed_login_attempts = 0
+            user.failed_login_attempts += 1
             user.last_failed_login = datetime.now(timezone.utc)
             db.session.commit()
             flash('البريد الإلكتروني أو كلمة المرور غير صحيحة.', 'danger')
@@ -1550,14 +1663,38 @@ def scan_route():
 
     scanner = EthicalSecurityScannerV7(app, target_url, scan_id, options)
 
-    with scan_lock:
-        active_scans[scan_id] = {'status': 'queued', 'progress': 0, 'log': [], 'target_url': target_url}
+    url_pattern = re.compile(
+        r'^(https?://)'  # http:// or https://
+        r'((([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})|'  # domain...
+        r'((([0-9]{1,3}\.){3}[0-9]{1,3})))'  # ...or ip
+        r'(:[0-9]+)?'  # optional port
+        r'(/.*)?$', re.IGNORECASE)  # optional path
 
-    thread = threading.Thread(target=scanner.start, name=f"Scanner-{scan_id[:6]}")
-    thread.daemon = True
-    thread.start()
-    return redirect(url_for('scan_progress_route', scan_id=scan_id))
+    if not url_pattern.match(target_url):
+        flash("عنوان URL المستهدف غير صالح. الرجاء إدخال عنوان URL كامل وصحيح (e.g., https://example.com).", "danger")
+        return redirect(url_for('index_route'))
+    if redis_client:
+        scan_id = str(uuid.uuid4())
+        new_scan = Scan(id=scan_id, target_url=target_url, user_id=current_user.id)
+        db.session.add(new_scan)
+        db.session.commit()
 
+        scanner = EthicalSecurityScannerV7(app, target_url, scan_id, options)
+
+        # Create a hash for scan metadata and a separate list for logs
+        redis_client.hmset(f"scan:{scan_id}", {
+            'status': 'queued',
+            'progress': '0',
+            'target_url': target_url
+        })
+
+        thread = threading.Thread(target=scanner.start, name=f"Scanner-{scan_id[:6]}")
+        thread.daemon = True
+        thread.start()
+        return redirect(url_for('scan_progress_route', scan_id=scan_id))
+    else:
+        flash("خطأ حرج: خدمة تتبع الحالة (Redis) غير متاحة. لا يمكن بدء الفحص.", "danger")
+        return redirect(url_for('index_route'))
 
 @app.route('/scan_progress/<scan_id>')
 @login_required
@@ -1572,17 +1709,23 @@ def scan_progress_route(scan_id):
 @login_required
 def scan_status_route(scan_id):
     scan_info_db = Scan.query.filter_by(id=scan_id, user_id=current_user.id).first_or_404()
-    with scan_lock: info = active_scans.get(scan_id, {})
+    info = {}
+    log = []
+
+    # --- [MODIFIED] Read from Redis ---
+    if redis_client:
+        # Fetch metadata hash
+        info = redis_client.hgetall(f"scan:{scan_id}")
+        log = redis_client.lrange(f"scan_log:{scan_id}", -50, -1)
+
     results_url = url_for('results_route', scan_id=scan_id) if scan_info_db.status in ['completed', 'error'] else None
 
     return jsonify({
         'status': info.get('status', scan_info_db.status),
-        'progress': info.get('progress', 100 if scan_info_db.status in ['completed', 'error'] else 0),
-        'log': info.get('log', [])[-50:],
+        'progress': int(info.get('progress', 100 if scan_info_db.status in ['completed', 'error'] else 0)),
+        'log': log,
         'results_url': results_url
     })
-
-
 @app.route('/results/<scan_id>')
 @login_required
 def results_route(scan_id):
@@ -1600,6 +1743,36 @@ def results_route(scan_id):
         results['vulnerabilities'].sort(key=lambda v: SEVERITY_SCORES.get(v.get('severity'), 0), reverse=True)
 
     lang = request.args.get('lang', 'en')
+
+    # الترجمة الديناميكية
+    if lang == 'ar':
+        for vuln in results.get('vulnerabilities', []):
+            for key in ['description', 'remediation']:
+                translated_key = f"{key}_translated"
+                original_text = vuln.get(key)
+
+                if original_text and not vuln.get(translated_key):
+                    # --- [MODIFIED] Using Redis for persistent translation caching ---
+                    if redis_client:
+                        cached_translation = redis_client.hget("translation_cache:ar", original_text)
+                    else:
+                        cached_translation = None
+
+                    if cached_translation:
+                        # 1. Found in Redis cache
+                        vuln[translated_key] = cached_translation.decode('utf-8')
+                    else:
+                        # 2. Not in cache, call API
+                        try:
+                            translated_text = translator.translate(original_text, src='en', dest='ar').text
+                            vuln[translated_key] = translated_text
+                            # 3. Store the new translation in Redis for future use
+                            if redis_client:
+                                redis_client.hset("translation_cache:ar", original_text, translated_text)
+                        except Exception as e:
+                            logger.error(f"Translation failed: {e}")
+                            vuln[translated_key] = f"[تعذر الترجمة] {original_text}"
+
     severities = [v.get('severity', 'Info') for v in results.get('vulnerabilities', [])]
     chart_data = {
         'critical': severities.count('Critical'), 'high': severities.count('High'),
@@ -1612,13 +1785,64 @@ def results_route(scan_id):
     elif risk_score >= 20:
         risk_level = {'text_en': 'High', 'text_ar': 'مرتفع', 'color': '#fd7e14'}
 
-    # Placeholder for translations
-    translations = {'ar': {}, 'en': {}}
+    # --- [UPDATED] قاموس الترجمة الكامل ---
+    translations = {
+        'ar': {
+            'security_assessment_report': 'تقرير تقييم أمني',
+            'executive_summary': 'الملخص التنفيذي',
+            'overall_risk_level': 'مستوى المخاطرة العام',
+            'total_vulnerabilities': 'إجمالي الثغرات',
+            'critical_findings': 'نتائج حرجة',
+            'high_findings': 'نتائج عالية',
+            'medium_findings': 'نتائج متوسطة',
+            'low_findings': 'نتائج منخفضة',
+            'info_findings': 'نتائج إعلامية',
+            'key_observations': 'الملاحظات الرئيسية',
+            'key_observations_text': 'كشف تقييم {} عن {} ثغرة، مما يشير إلى وضع مخاطرة بمستوى {}. قد تعرض هذه النقاط التطبيق لهجمات تؤدي إلى تسريب بيانات أو تعطيل الخدمة.',
+            'strategic_recommendation': 'التوصية الاستراتيجية',
+            'strategic_recommendation_text': 'يجب إعطاء أولوية قصوى لمعالجة كافة الثغرات ذات الخطورة الحرجة والعالية. نوصي بتخصيص الموارد التقنية فورًا لمواجهة هذه النتائج والحد من المخاطر الجوهرية على الأعمال.',
+            'technical_findings': 'النتائج الفنية التفصيلية',
+            'description_impact': 'الوصف والأثر',
+            'remediation_steps': 'خطوات الإصلاح',
+            'technical_evidence': 'الأدلة الفنية',
+            'reference': 'مرجع',
+            'example_cve': 'مثال CVE',
+            'lang_switch': 'Switch to English'
+        },
+        'en': {
+            'security_assessment_report': 'Security Assessment Report',
+            'executive_summary': 'Executive Summary',
+            'overall_risk_level': 'Overall Risk Level',
+            'total_vulnerabilities': 'Total Vulnerabilities',
+            'critical_findings': 'Critical',
+            'high_findings': 'High',
+            'medium_findings': 'Medium',
+            'low_findings': 'Low',
+            'info_findings': 'Info',
+            'key_observations': 'Key Observations',
+            'key_observations_text': 'The assessment of {} identified {} vulnerabilities, indicating a {} risk posture. These weaknesses could expose the application to attacks, leading to data breaches or service disruption.',
+            'strategic_recommendation': 'Strategic Recommendation',
+            'strategic_recommendation_text': 'Prioritize remediation of all Critical and High severity vulnerabilities. Allocate immediate technical resources to address these findings and mitigate significant business risks.',
+            'technical_findings': 'Detailed Technical Findings',
+            'description_impact': 'Description & Impact',
+            'remediation_steps': 'Remediation Steps',
+            'technical_evidence': 'Technical Evidence',
+            'reference': 'Reference',
+            'example_cve': 'Example CVE',
+            'lang_switch': 'التحويل إلى العربية'
+        }
+    }
+
     tr = translations.get(lang, translations['en'])
 
-    return render_template('results_v5.html', results=results, chart_data=chart_data, risk_level=risk_level, tr=tr,
-                           lang=lang)
-
+    return render_template(
+        'results_v5.html',  # <-- تأكد من استخدام اسم الملف الجديد
+        results=results,
+        chart_data=chart_data,
+        risk_level=risk_level,
+        tr=tr,
+        lang=lang
+    )
 
 @app.route('/download_report/<scan_id>/<lang>')
 @login_required
@@ -1664,7 +1888,8 @@ def verify_environment():
 
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    app.run(host="127.0.0.1", port=5003, debug=True)
+    print("--- Starting Application with Waitress WSGI Server ---")
+    print("--- Running on http://127.0.0.1:5003 ---")
+    print("--- Press CTRL+C to quit ---")
 
+    serve(app, host='127.0.0.1', port=5003)
