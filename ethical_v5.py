@@ -56,8 +56,8 @@ LOCKOUT_PERIOD = timedelta(minutes=15)
 app = Flask(__name__, template_folder=os.path.join(current_dir, 'templates'), static_folder='static')
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'a-real-secret-key-is-required-in-env-file')
 #اعدادات قاعده البيانات المحليه
-#app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(current_dir, 'scanner_app.db')
-#app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(current_dir, 'scanner_app.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 ######################################################################
 # اعدادات قاعده البيانات على الانترنت Postsql
@@ -1042,37 +1042,57 @@ class BusinessLogicModule(ScannerModule):
             self.logger.info(f"  - Running Test Case: {test_case['name']}")
             self._run_test_case(workflow, test_case)
 
-    def _run_test_case(self, workflow, test_case):
-        # 1. تنفيذ الخطوات العادية حتى الوصول إلى الخطوة المستهدفة
+
+
+    # ... (هذه الدوال يجب أن تكون methods داخل فئة BusinessLogicModule)
+    def _run_test_case(self, workflow: dict, test_case: dict):
+        """
+        ينفذ حالة اختبار كاملة: يشغل الخطوات التمهيدية، يجمع السياق، يطبق الطفرات، ويتحقق من النتيجة.
+        """
+        self.logger.info(f"  Executing Test Case: '{test_case['name']}'")
+
+        # 1. تهيئة السياق من المتغيرات الأولية في ملف workflow.json
         context_variables = workflow.get('variables', {}).copy()
 
-        target_step_id = test_case['target_step']
-        target_step_index = next((i for i, step in enumerate(workflow['steps']) if step['step_id'] == target_step_id),
-                                 -1)
-
-        if target_step_index == -1:
-            self.logger.error(f"Target step '{target_step_id}' not found in workflow.")
+        target_step_id = test_case.get('target_step')
+        if not target_step_id:
+            self.logger.error("  - Test case is missing 'target_step'. Aborting.")
             return
 
-        # تنفيذ الخطوات التي تسبق الخطوة المستهدفة
+        try:
+            target_step_index = next(i for i, step in enumerate(workflow['steps']) if step['step_id'] == target_step_id)
+        except StopIteration:
+            self.logger.error(f"  - Target step '{target_step_id}' not found in workflow. Aborting test case.")
+            return
+
+        # 2. تنفيذ الخطوات التمهيدية (Prerequisite Steps) بالترتيب
         for i in range(target_step_index):
             step = workflow['steps'][i]
-            # (هنا تحتاج إلى منطق لتنفيذ الطلب العادي وتحديث context_variables)
-            # هذا الجزء يتطلب بناء دالة مساعدة لتنفيذ الطلبات واستخلاص المخرجات
-            pass  # للتوضيح
+            self.logger.info(f"  - Executing prerequisite step: '{step.get('description', step['step_id'])}'")
 
-        # 2. تطبيق الطفرات على الخطوة المستهدفة
+            # تنفيذ طلب واحد
+            response = self._execute_single_step(step, context_variables)
+
+            # إذا فشلت خطوة تمهيدية، يجب إيقاف حالة الاختبار بأكملها
+            if not response or not (200 <= response.status_code < 300):
+                status = response.status_code if response else "No Response"
+                self.logger.error(f"  - Prerequisite step failed with status {status}. Aborting test case.")
+                return
+
+            # استخلاص البيانات من الاستجابة وتحديث السياق
+            self._extract_context(step, response, context_variables)
+
+        # 3. تطبيق الطفرات على الخطوة المستهدفة وإرسال الطلبات
         target_step = workflow['steps'][target_step_index]
         mutations = test_case.get('mutations', {})
 
-        # حلقة على جميع الطفرات الممكنة
         for param_to_mutate, values in mutations.items():
             for mutated_value in values:
-                # إنشاء نسخة من الطلب وتطبيق الطفرة
+                # إنشاء الطلب الخبيث
                 mutated_request = self._mutate_request(target_step['request'], param_to_mutate, mutated_value,
                                                        context_variables)
 
-                # 3. إرسال الطلب الخبيث
+                # إرسال الطلب الخبيث
                 response = self.core.make_request(
                     mutated_request['method'],
                     urljoin(self.core.target_url, mutated_request['path']),
@@ -1081,34 +1101,223 @@ class BusinessLogicModule(ScannerModule):
                     params=mutated_request.get('params', {})
                 )
 
-                if not response: continue
+                if not response:
+                    continue
 
                 # 4. التحقق من التأكيد (Assertion)
-                assertion = test_case['assertion']
-                is_vulnerable = False
-                if assertion['type'] == 'body_contains' and assertion['value'] in response.text:
-                    is_vulnerable = True
-                # ... (يمكن إضافة أنواع أخرى من التأكيدات مثل status_code_is, body_not_contains)
-
-                if is_vulnerable:
+                assertion = test_case.get('assertion')
+                if self._check_assertion(response, assertion):
+                    self.logger.warning(f"  - VULNERABILITY FOUND by test case '{test_case['name']}'!")
                     self.core.add_vulnerability(
                         f"Business Logic Flaw: {test_case['name']}",
-                        "High",  # أو حسب خطورة الحالة
+                        test_case.get('severity', "High"),
                         test_case['description'],
                         "CWE-840",  # Business Logic Errors
-                        "Review the business logic flow to ensure that state transitions are secure and user input cannot bypass expected steps or values. Implement server-side validation for all parameters.",
-                        {'workflow_file': os.path.basename(workflow['name']), 'mutated_param': param_to_mutate,
-                         'mutated_value': str(mutated_value)},
-                        cve="N/A"  # الثغرات المنطقية عادة لا تملك CVE
+                        test_case['remediation'],
+                        {'workflow_file': os.path.basename(workflow.get('name', 'N/A')),
+                         'mutated_param': param_to_mutate,
+                         'mutated_value': str(mutated_value),
+                         'assertion_type': assertion.get('type')},
+                        cve="N/A"
                     )
+                    # أوقف الاختبار لهذه الطفرة بمجرد العثور على ثغرة
+                    return
 
-    def _mutate_request(self, original_request, param, value, context):
-        # دالة مساعدة لتطبيق الطفرات على الطلب
-        # ستحتاج إلى استبدال المتغيرات (مثل {{USER_ACCOUNT}}) بقيمها من context
-        # ثم استبدال الپارامتر المستهدف بالقيمة الخبيثة
-        # هذه الدالة تتطلب شيفرة مفصلة للتعامل مع JSON, params, headers
-        return original_request  # يجب إكمال هذا الجزء
-# <<< [ENHANCEMENT] New Module: Local File Inclusion >>>
+    # --- الدوال المساعدة الجديدة (يجب إضافتها أيضًا داخل فئة BusinessLogicModule) ---
+
+    def _execute_single_step(self, step: dict, context: dict) -> Optional[requests.Response]:
+        """ينفذ طلب HTTP واحد بعد تعويض المتغيرات السياقية."""
+        request_data = step.get('request', {})
+        # تعويض المتغيرات في الطلب قبل إرساله
+        request_data = self._substitute_context_variables(request_data, context)
+
+        response = self.core.make_request(
+            request_data.get('method', 'GET'),
+            urljoin(self.core.target_url, request_data.get('path', '/')),
+            headers=request_data.get('headers', {}),
+            json=request_data.get('json_body', {}),
+            params=request_data.get('params', {})
+        )
+        return response
+
+    def _extract_context(self, step: dict, response: requests.Response, context: dict):
+        """يستخلص البيانات من استجابة HTTP ويضيفها إلى قاموس السياق."""
+        extractions = step.get('extract', {})
+
+        for var_name, extract_rule in extractions.items():
+            source = extract_rule.get('from')
+            path = extract_rule.get('path')
+
+            extracted_value = None
+            if source == 'json_body':
+                try:
+                    # منطق بسيط لاستخلاص البيانات من JSON. يمكن جعله أكثر تعقيدًا لاحقًا.
+                    data = response.json()
+                    keys = path.split('.')
+                    value = data
+                    for key in keys:
+                        value = value[key]
+                    extracted_value = value
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    self.logger.warning(f"  - Could not extract '{path}' from JSON body: {e}")
+            elif source == 'header':
+                extracted_value = response.headers.get(path)
+
+            if extracted_value is not None:
+                context[var_name] = extracted_value
+                self.logger.info(f"  - Extracted '{var_name}' = '{str(extracted_value)[:30]}...'")
+
+    def _check_assertion(self, response: requests.Response, assertion: dict) -> bool:
+        """يتحقق مما إذا كانت الاستجابة تطابق التأكيد المحدد في حالة الاختبار."""
+        if not assertion:
+            return False
+
+        assertion_type = assertion.get('type')
+        assertion_value = assertion.get('value')
+
+        is_vulnerable = False
+
+        if assertion_type == 'status_code_is':
+            is_vulnerable = response.status_code == int(assertion_value)
+
+        elif assertion_type == 'status_code_in_range':
+            start, end = map(int, assertion_value.split('-'))
+            is_vulnerable = start <= response.status_code <= end
+
+        elif assertion_type == 'body_contains':
+            is_vulnerable = str(assertion_value) in response.text
+
+        elif assertion_type == 'body_not_contains':
+            is_vulnerable = str(assertion_value) not in response.text
+
+        elif assertion_type == 'header_contains':
+            key, val = assertion_value.split(':', 1)
+            header_value = response.headers.get(key.strip(), '')
+            is_vulnerable = val.strip() in header_value
+
+        elif assertion_type == 'header_not_contains':
+            key, val = assertion_value.split(':', 1)
+            header_value = response.headers.get(key.strip(), '')
+            is_vulnerable = val.strip() not in header_value
+
+        elif assertion_type == 'json_key_is':
+            # assertion_value: "user.id=123"
+            try:
+                key_path, expected_value = assertion_value.split('=')
+                keys = key_path.strip().split('.')
+                data = response.json()
+                for key in keys:
+                    data = data.get(key, {})
+                is_vulnerable = str(data) == expected_value.strip()
+            except Exception:
+                is_vulnerable = False
+
+        elif assertion_type == 'json_key_exists':
+            # assertion_value: "user.email"
+            try:
+                keys = assertion_value.strip().split('.')
+                data = response.json()
+                for key in keys:
+                    if key not in data:
+                        is_vulnerable = False
+                        break
+                    data = data[key]
+                else:
+                    is_vulnerable = True
+            except Exception:
+                is_vulnerable = False
+
+        elif assertion_type == 'redirects_to_url':
+            # assertion_value: expected final URL after redirects
+            is_vulnerable = response.history and response.url == assertion_value
+
+        elif assertion_type == 'content_type_is':
+            # assertion_value: "application/json"
+            is_vulnerable = response.headers.get('Content-Type', '').startswith(assertion_value)
+
+        elif assertion_type == 'response_time_less_than':
+            # assertion_value: max time in seconds
+            is_vulnerable = response.elapsed.total_seconds() < float(assertion_value)
+
+        if is_vulnerable:
+            self.logger.info(f"  - Assertion PASSED: {assertion_type} '{assertion_value}'")
+        else:
+            self.logger.info(f"  - Assertion FAILED: {assertion_type} '{assertion_value}'")
+
+        return is_vulnerable
+
+    def _mutate_request(self, original_request: dict, param_to_mutate: str, new_value: any, context: dict) -> dict:
+        """
+        تنشئ نسخة من طلب HTTP، تعوض المتغيرات السياقية، ثم تطبق طفرة محددة.
+
+        هذه الدالة هي المحرك الأساسي لوحدة فحص منطق العمل.
+
+        Args:
+            original_request (dict): القاموس الأصلي للطلب كما هو معرف في ملف workflow.
+            param_to_mutate (str): اسم الحقل أو الپارامتر المراد تغيير قيمته.
+            new_value (any): القيمة الجديدة (الخبيثة) التي سيتم وضعها في الپارامتر.
+            context (dict): قاموس يحتوي على المتغيرات المستخرجة من الخطوات السابقة (مثل user_id, token).
+
+        Returns:
+            dict: قاموس يمثل الطلب الجديد الجاهز للإرسال بعد تطبيق الطفرات.
+        """
+        try:
+            # الخطوة 1: إنشاء نسخة عميقة (Deep Copy) من الطلب الأصلي.
+            # هذا أمر بالغ الأهمية لمنع التأثير على حالات الاختبار الأخرى التي قد تستخدم نفس الطلب الأصلي.
+            mutated_request = json.loads(json.dumps(original_request))
+
+            # الخطوة 2: استبدال جميع المتغيرات السياقية (مثل {{USER_ID}}) في الطلب بأكمله.
+            # سنستخدم دالة مساعدة للقيام بذلك بشكل متكرر على جميع القيم النصية.
+            mutated_request = self._substitute_context_variables(mutated_request, context)
+
+            # الخطوة 3: تطبيق الطفرة المحددة على الپارامتر المستهدف.
+            # نبحث عن الپارامتر في الأماكن الأكثر شيوعًا: پارامترات الرابط (query params) وجسم الطلب (JSON body).
+            found_and_mutated = False
+
+            # البحث في پارامترات الرابط (مثال: /api/users?id=123)
+            if 'params' in mutated_request and param_to_mutate in mutated_request.get('params', {}):
+                mutated_request['params'][param_to_mutate] = new_value
+                found_and_mutated = True
+                self.logger.info(f"  - Mutated query parameter '{param_to_mutate}' to: {new_value}")
+
+            # البحث في جسم الطلب من نوع JSON (مثال: {"role": "user"})
+            elif 'json_body' in mutated_request and param_to_mutate in mutated_request.get('json_body', {}):
+                mutated_request['json_body'][param_to_mutate] = new_value
+                found_and_mutated = True
+                self.logger.info(f"  - Mutated JSON key '{param_to_mutate}' to: {new_value}")
+
+            # يمكنك إضافة البحث في أماكن أخرى هنا إذا لزم الأمر، مثل الترويسات (headers).
+
+            if not found_and_mutated:
+                self.logger.warning(
+                    f"  - Parameter '{param_to_mutate}' not found in the request to mutate. The workflow file might be misconfigured.")
+
+            return mutated_request
+
+        except (json.JSONDecodeError, TypeError) as e:
+            self.logger.error(f"Failed to mutate request. Original: {original_request}. Error: {e}")
+            # أرجع الطلب الأصلي في حالة حدوث خطأ لمنع انهيار الفحص
+            return original_request
+
+    # --- دالة مساعدة جديدة يجب إضافتها أيضًا داخل فئة BusinessLogicModule ---
+    def _substitute_context_variables(self, data: any, context: dict) -> any:
+        """
+        دالة متكررة (recursive) لاستبدال المتغيرات المحاطة بـ {{}} بقيمها من السياق.
+        """
+        if isinstance(data, dict):
+            return {k: self._substitute_context_variables(v, context) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._substitute_context_variables(item, context) for item in data]
+        elif isinstance(data, str):
+            for key, val in context.items():
+                placeholder = f"{{{{{key}}}}}"  # يبحث عن {{KEY}}
+                data = data.replace(placeholder, str(val))
+            return data
+        else:
+            # أرجع أنواع البيانات الأخرى (أرقام، boolean) كما هي
+            return data
+
+
 class LFIModule(ScannerModule):
     def run(self):
         targets = []
@@ -1455,5 +1664,7 @@ def verify_environment():
 
 
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(host="127.0.0.1", port=5003, debug=True)
 
