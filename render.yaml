@@ -16,7 +16,7 @@ services:
     startCommand: "gunicorn 'ethical_v5:app'"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.5 # استخدم نفس إصدار Python الذي تستخدمه محليًا
+        value: 3.12. # استخدم نفس إصدار Python الذي تستخدمه محليًا
       - key: FLASK_APP
         value: ethical_v5.py
       - key: DATABASE_URL
@@ -24,4 +24,5 @@ services:
           name: scanner-db
           property: connectionString
       - key: FLASK_SECRET_KEY
+
         generateValue: true
