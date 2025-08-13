@@ -1,6 +1,6 @@
 
 
-# Ethical Security Scanner - الماسح الأمني الأخلاقي (V8)
+# Ethical Security Scanner - الماسح الأمني الأخلاقي 
 
 
 
